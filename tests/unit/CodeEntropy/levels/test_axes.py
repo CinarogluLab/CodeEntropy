@@ -2238,3 +2238,181 @@ def test_get_non_terminal_axes_3points(monkeypatch):
 
     assert np.allclose(centre, [1, 0, 0])
     assert np.allclose(axes, 3 * np.eye(3))
+
+def _memo_mol(positions, first_index=0, dimensions=(11.0, 12.0, 13.0, 90.0, 90.0, 90.0)):
+    """Build a molecule double whose atoms carry real positions."""
+    mol = MagicMock()
+    atoms = mol.atoms
+    atoms.universe = object()
+    atoms.ix = np.arange(first_index, first_index + len(positions), dtype=int)
+    atoms.__len__.return_value = len(positions)
+    atoms.positions = np.asarray(positions, dtype=np.float32)
+    atoms.masses = np.full(len(positions), 12.0)
+    atoms.dimensions = np.asarray(dimensions, dtype=np.float32)
+    return mol
+
+
+def test_residue_axes_recompute_when_the_box_changes(monkeypatch):
+    """A changed periodic box invalidates the memo even at identical positions.
+
+    make_whole reads the box as well as the positions, so a fixpoint observed
+    under one box says nothing about another (e.g. an NPT trajectory whose box
+    fluctuates frame to frame). Found in an independent review.
+    """
+    ax = AxesCalculator()
+
+    universe = _FakeUniverse({}, dimensions=[11.0, 12.0, 13.0, 90.0, 90.0, 90.0])
+    mol = _memo_mol([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    residue_atoms = MagicMock()
+    residue_atoms.center_of_mass.return_value = np.array([1.0, 2.0, 3.0])
+    topology = _residue_topology(has_neighbor_bonds=True)
+
+    make_whole = MagicMock()
+    monkeypatch.setattr("CodeEntropy.levels.axes.make_whole", make_whole)
+    group_axes = MagicMock(side_effect=lambda group: np.eye(3) * 5.0)
+    monkeypatch.setattr(ax, "get_principal_axes_from_group", group_axes)
+    monkeypatch.setattr(
+        ax,
+        "get_molecule_axes",
+        MagicMock(return_value=(np.eye(3) * 6.0, np.array([6.0, 5.0, 4.0]))),
+    )
+
+    kwargs = dict(
+        u=universe,
+        mol=mol,
+        residue_atoms=residue_atoms,
+        topology=topology,
+        box=None,
+    )
+    ax.get_residue_axes_from_topology(**kwargs)
+    ax.get_residue_axes_from_topology(**kwargs)  # fixpoint observed
+    assert make_whole.call_count == 2
+    ax.get_residue_axes_from_topology(**kwargs)  # would be skipped ...
+    assert make_whole.call_count == 2
+
+    # ... but the same positions under a different box must not be.
+    mol.atoms.dimensions = np.asarray(
+        [11.5, 12.0, 13.0, 90.0, 90.0, 90.0], dtype=np.float32
+    )
+    ax.get_residue_axes_from_topology(**kwargs)
+    assert make_whole.call_count == 3
+
+
+def test_residue_axes_reuses_whole_molecule_axes_within_a_frame(monkeypatch):
+    """The whole-molecule make_whole/principal_axes runs once per frame."""
+    ax = AxesCalculator()
+
+    universe = _FakeUniverse({}, dimensions=[11.0, 12.0, 13.0, 90.0, 90.0, 90.0])
+    mol = _memo_mol([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    residue_atoms = MagicMock()
+    residue_atoms.center_of_mass.return_value = np.array([1.0, 2.0, 3.0])
+    topology = _residue_topology(has_neighbor_bonds=True)
+
+    make_whole = MagicMock()
+    monkeypatch.setattr("CodeEntropy.levels.axes.make_whole", make_whole)
+    group_axes = MagicMock(side_effect=lambda group: np.eye(3) * 5.0)
+    monkeypatch.setattr(ax, "get_principal_axes_from_group", group_axes)
+    monkeypatch.setattr(
+        ax,
+        "get_molecule_axes",
+        MagicMock(return_value=(np.eye(3) * 6.0, np.array([6.0, 5.0, 4.0]))),
+    )
+
+    axes = [
+        ax.get_residue_axes_from_topology(
+            u=universe,
+            mol=mol,
+            residue_atoms=residue_atoms,
+            topology=topology,
+            box=None,
+        )[0]
+        for _ in range(3)
+    ]
+
+    # Call 1 runs, call 2 observes that make_whole changed nothing (fixpoint),
+    # call 3 is skipped.
+    assert make_whole.call_count == 2
+    assert group_axes.call_count == 2
+    for trans_axes in axes:
+        np.testing.assert_array_equal(trans_axes, np.eye(3) * 5.0)
+    # The skipped call must not hand callers the memo's own array.
+    assert axes[2] is not axes[1]
+
+
+def test_residue_axes_recompute_when_positions_change(monkeypatch):
+    """Moving the molecule invalidates the memo, as a new frame would."""
+    ax = AxesCalculator()
+
+    universe = _FakeUniverse({}, dimensions=[11.0, 12.0, 13.0, 90.0, 90.0, 90.0])
+    mol = _memo_mol([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    residue_atoms = MagicMock()
+    residue_atoms.center_of_mass.return_value = np.array([1.0, 2.0, 3.0])
+    topology = _residue_topology(has_neighbor_bonds=True)
+
+    make_whole = MagicMock()
+    monkeypatch.setattr("CodeEntropy.levels.axes.make_whole", make_whole)
+    group_axes = MagicMock(side_effect=lambda group: np.eye(3) * 5.0)
+    monkeypatch.setattr(ax, "get_principal_axes_from_group", group_axes)
+    monkeypatch.setattr(
+        ax,
+        "get_molecule_axes",
+        MagicMock(return_value=(np.eye(3) * 6.0, np.array([6.0, 5.0, 4.0]))),
+    )
+
+    kwargs = dict(
+        u=universe,
+        mol=mol,
+        residue_atoms=residue_atoms,
+        topology=topology,
+        box=None,
+    )
+    ax.get_residue_axes_from_topology(**kwargs)
+    mol.atoms.positions = np.asarray(
+        [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], dtype=np.float32
+    )
+    ax.get_residue_axes_from_topology(**kwargs)
+
+    assert make_whole.call_count == 2
+    assert group_axes.call_count == 2
+
+
+def test_residue_axes_recompute_when_masses_change(monkeypatch):
+    """A changed mass invalidates the memo even at identical positions and box.
+
+    The principal axes read masses through the moment-of-inertia tensor, so a
+    result cached under one set of masses must not be reused under another.
+    Found in an independent review of the 2.5.0 port.
+    """
+    ax = AxesCalculator()
+
+    universe = _FakeUniverse({}, dimensions=[11.0, 12.0, 13.0, 90.0, 90.0, 90.0])
+    mol = _memo_mol([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    residue_atoms = MagicMock()
+    residue_atoms.center_of_mass.return_value = np.array([1.0, 2.0, 3.0])
+    topology = _residue_topology(has_neighbor_bonds=True)
+
+    make_whole = MagicMock()
+    monkeypatch.setattr("CodeEntropy.levels.axes.make_whole", make_whole)
+    group_axes = MagicMock(side_effect=lambda group: np.eye(3) * 5.0)
+    monkeypatch.setattr(ax, "get_principal_axes_from_group", group_axes)
+    monkeypatch.setattr(
+        ax,
+        "get_molecule_axes",
+        MagicMock(return_value=(np.eye(3) * 6.0, np.array([6.0, 5.0, 4.0]))),
+    )
+
+    kwargs = dict(
+        u=universe,
+        mol=mol,
+        residue_atoms=residue_atoms,
+        topology=topology,
+        box=None,
+    )
+    ax.get_residue_axes_from_topology(**kwargs)
+    ax.get_residue_axes_from_topology(**kwargs)  # fixpoint observed
+    ax.get_residue_axes_from_topology(**kwargs)  # skipped
+    assert group_axes.call_count == 2
+
+    mol.atoms.masses = np.array([100.0, 12.0])
+    ax.get_residue_axes_from_topology(**kwargs)
+    assert group_axes.call_count == 3

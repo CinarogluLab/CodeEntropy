@@ -117,6 +117,8 @@ class ResultsReporter:
         self.molecule_data: list[tuple[Any, Any, Any, Any]] = []
         self.residue_data: list[list[Any]] = []
         self.group_labels: dict[Any, dict[str, Any]] = {}
+        self.water_entropy_export: dict[str, dict[str, Any]] = {}
+        self.water_entropy_bulk_export: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def clean_residue_name(resname: Any) -> str:
@@ -422,6 +424,13 @@ class ResultsReporter:
         if include_raw_tables:
             payload["molecule_data"] = mol_rows
             payload["residue_data"] = res_rows
+
+        # Additive: absent unless interfacial water entropy was computed, so the
+        # existing keys are unchanged either way.
+        if self.water_entropy_export:
+            payload["water_entropy"] = self.water_entropy_export
+        if self.water_entropy_bulk_export:
+            payload["water_entropy_bulk"] = self.water_entropy_bulk_export
 
         return payload
 

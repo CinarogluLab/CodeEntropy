@@ -127,13 +127,15 @@ def test_collect_angle_observable_collects_ua_and_residue_arrays():
     )
     topology = _make_topology()
 
-    ua_results = SimpleNamespace(
-        results=SimpleNamespace(angles=np.array([[-10.0], [10.0]], dtype=float))
+    # Every dihedral in the molecule is computed in a single pass over the
+    # chunk's frames, so column 0 is the UA dihedral and column 1 the residue
+    # dihedral of one batched result.
+    batched_results = SimpleNamespace(
+        results=SimpleNamespace(
+            angles=np.array([[-10.0, 30.0], [10.0, -40.0]], dtype=float)
+        )
     )
-    residue_results = SimpleNamespace(
-        results=SimpleNamespace(angles=np.array([[30.0], [-40.0]], dtype=float))
-    )
-    collector._run_dihedrals = MagicMock(side_effect=[ua_results, residue_results])
+    collector._run_dihedrals = MagicMock(return_value=batched_results)
 
     observable = collector._collect_angle_observable(
         topology=topology,
@@ -144,7 +146,8 @@ def test_collect_angle_observable_collects_ua_and_residue_arrays():
     np.testing.assert_allclose(observable.ua_angles_by_residue[0], [[350.0], [10.0]])
     assert observable.ua_angles_by_residue[1].shape == (2, 0)
     np.testing.assert_allclose(observable.residue_angles, [[30.0], [320.0]])
-    assert collector._run_dihedrals.call_count == 2
+    assert collector._run_dihedrals.call_count == 1
+    assert collector._run_dihedrals.call_args.kwargs["dihedrals"] == ["ua0", "res0"]
 
 
 def test_run_dihedrals_uses_frame_selection_bounds():

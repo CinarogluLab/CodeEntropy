@@ -19,6 +19,7 @@ class FakeAtomGroup:
         self._atoms = list(atoms or [])
         self.name = name
         self.indices = np.asarray([atom.index for atom in self._atoms], dtype=int)
+        self.masses = np.asarray([atom.mass for atom in self._atoms], dtype=float)
 
     def __iter__(self):
         return iter(self._atoms)
@@ -27,6 +28,8 @@ class FakeAtomGroup:
         return len(self._atoms)
 
     def __getitem__(self, index):
+        if isinstance(index, np.ndarray) and index.dtype == bool:
+            return FakeAtomGroup([a for a, keep in zip(self._atoms, index) if keep])
         if isinstance(index, (list, tuple, np.ndarray)):
             return FakeAtomGroup([self._atoms[int(i)] for i in index])
         return self._atoms[int(index)]

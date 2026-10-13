@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
+
+from CodeEntropy.levels.topology_cache import get_bonded_indices
+
 logger = logging.getLogger(__name__)
 
 
@@ -129,13 +133,18 @@ class HierarchyBuilder:
         if len(heavy_atoms) == 0:
             return [data_container.select_atoms("all")]
 
+        universe = data_container.universe
+        bonded_indices = get_bonded_indices(universe)
+        masses = universe.atoms.masses
+        # Selection operates inside the input container, even for partial fragments.
+        member = np.zeros(len(universe.atoms), dtype=bool)
+        member[data_container.indices] = True
         beads = []
         for atom in heavy_atoms:
-            selection = (
-                f"index {atom.index} "
-                f"or ((prop mass <= 1.1) and bonded index {atom.index})"
-            )
-            beads.append(data_container.select_atoms(selection))
+            bonded = bonded_indices[atom.index]
+            light = bonded[(masses[bonded] <= 1.1) & member[bonded]]
+            indices = np.unique(np.concatenate(([atom.index], light)))
+            beads.append(universe.atoms[indices])
 
         logger.debug("United-atom bead sizes: %s", [len(b) for b in beads])
         return beads

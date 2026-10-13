@@ -6,7 +6,35 @@ Currently RAD is the default with grid as an alternative.
 
 import MDAnalysis as mda
 import numpy as np
+import os
 from numba import njit
+
+
+@njit
+def _distances_without_temporaries(coms, center, dimensions):
+    """Fuse the reference distance arithmetic without fastmath or changed PBC."""
+    result = np.empty(len(coms), dtype=np.float64)
+    half = 0.5 * dimensions
+    for i in range(len(coms)):
+        squared = 0.0
+        for d in range(3):
+            delta = coms[i, d] - center[d]
+            if delta > half[d]:
+                delta -= dimensions[d]
+            if delta < -half[d]:
+                delta += dimensions[d]
+            squared += delta * delta
+        result[i] = np.sqrt(squared)
+    return result
+
+
+def _nearest_stable(distances, limit=30):
+    """Return exactly the prefix of a stable full sort, including cutoff ties."""
+    if len(distances) <= limit or not np.isfinite(distances).all():
+        return np.argsort(distances, kind="mergesort")[:limit]
+    cutoff = np.partition(distances, limit - 1)[limit - 1]
+    candidates = np.flatnonzero(distances <= cutoff)
+    return candidates[np.argsort(distances[candidates], kind="mergesort")[:limit]]
 
 
 @njit
@@ -122,7 +150,7 @@ class Search:
     Class for functions to find neighbors.
     """
 
-    def __init__(self):
+    def __init__(self, backend=None):
         """
         Initialize the Search class.
 
@@ -134,6 +162,11 @@ class Search:
         self._cached_fragments = None
         self._cached_coms = None
         self._cached_dimensions = None
+        self._cached_universe = None
+        self._backend = backend or os.environ.get("CODEENTROPY_RAD_BACKEND", "cpu")
+        if self._backend not in ("cpu", "gpu"):
+            raise ValueError("CODEENTROPY_RAD_BACKEND must be 'cpu' or 'gpu'")
+        self._gpu_candidates = None
 
     def _update_cache(self, universe, frame_index: int) -> None:
         """Update cached MDAnalysis data for a specific selected frame.
@@ -147,7 +180,7 @@ class Search:
         """
         frame_index = int(frame_index)
 
-        if self._cached_frame == frame_index:
+        if self._cached_frame == frame_index and self._cached_universe is universe:
             return
 
         fragments = universe.atoms.fragments
@@ -157,6 +190,12 @@ class Search:
         self._cached_coms = coms
         self._cached_dimensions = universe.dimensions[:3]
         self._cached_frame = frame_index
+        self._cached_universe = universe
+        self._gpu_candidates = None
+        if self._backend == "gpu":
+            from CodeEntropy.levels.gpu_search import prepare_candidates
+            self._gpu_candidates = prepare_candidates(coms, self._cached_dimensions,
+                                                       self._get_distances)
 
     def _get_distances(self, coms, i_coords, dimensions):
         """
@@ -175,23 +214,7 @@ class Search:
             np.ndarray:
                 Distances from the central molecule to all fragments.
         """
-        delta = coms - i_coords
-
-        half_dimensions = 0.5 * dimensions
-
-        for d in range(3):
-            delta[:, d] = np.where(
-                delta[:, d] > half_dimensions[d],
-                delta[:, d] - dimensions[d],
-                delta[:, d],
-            )
-            delta[:, d] = np.where(
-                delta[:, d] < -half_dimensions[d],
-                delta[:, d] + dimensions[d],
-                delta[:, d],
-            )
-
-        return np.sqrt((delta * delta).sum(axis=1))
+        return _distances_without_temporaries(coms, i_coords, dimensions)
 
     def get_RAD_neighbors(self, universe, mol_id, frame_source, frame_index):
         """Find RAD neighbours of a molecule at one selected frame.
@@ -206,7 +229,13 @@ class Search:
             Indices of neighbouring molecules identified by RAD.
         """
         frame_index = int(frame_index)
-        frame_source.seek(frame_index)
+        # Keep the first seek: covariance processing may have made molecules whole
+        # in-place. Reload once before caching the reference-frame COMs, then reuse
+        # those values for every molecule in this frame.
+        if (self._cached_frame != frame_index
+                or self._cached_universe is not universe
+                or universe.trajectory.ts.frame != frame_index):
+            frame_source.seek(frame_index)
         self._update_cache(universe, frame_index)
 
         fragments = self._cached_fragments
@@ -216,6 +245,12 @@ class Search:
         number_molecules = len(fragments)
         central_position = coms[mol_id]
 
+        if self._gpu_candidates is not None:
+            candidates = self._gpu_candidates[mol_id]
+            if candidates is not None:
+                return _rad_blocking_loop(central_position, candidates[0], candidates[1],
+                                          coms, dimensions)
+
         distances_array = self._get_distances(coms, central_position, dimensions)
 
         indices = np.arange(number_molecules)
@@ -223,7 +258,9 @@ class Search:
         filtered_indices = indices[mask]
         filtered_distances = distances_array[mask]
 
-        order = np.argsort(filtered_distances, kind="mergesort")
+        # The blocking loop consumes only the nearest 30 molecules. Preserve the
+        # stable reference prefix exactly without sorting the entire solvent box.
+        order = _nearest_stable(filtered_distances)
 
         sorted_indices = filtered_indices[order]
         sorted_distances = filtered_distances[order]

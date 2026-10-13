@@ -154,6 +154,15 @@ class DihedralAngleCollector(DihedralTopologyDiscovery):
         ua_angles_by_residue: dict[int, np.ndarray] = {}
         residue_angles: np.ndarray | None = None
 
+        # Dihedral(...).run() walks the whole chunk's frame range, so running it
+        # once per residue re-read every frame once per residue (num_residues + 1
+        # full passes per molecule per chunk). Each dihedral angle depends only on
+        # its own four atoms at a given frame, so every dihedral in the molecule is
+        # batched into a single pass and split back out by column afterwards.
+        batched_dihedrals: list[Any] = []
+        ua_spans: list[tuple[int, int, int]] = []
+        residue_span: tuple[int, int] | None = None
+
         if "united_atom" in level_list:
             for res_id in range(topology.num_residues):
                 dihedrals = topology.ua_dihedrals_by_residue.get(res_id, [])
@@ -163,26 +172,36 @@ class DihedralAngleCollector(DihedralTopologyDiscovery):
                     )
                     continue
 
-                dihedral_results = self._run_dihedrals(
-                    dihedrals=dihedrals,
-                    frame_selection=task.frame_selection,
-                )
-                ua_angles_by_residue[res_id] = self._extract_positive_angle_array(
-                    dihedral_results=dihedral_results,
-                    num_dihedrals=len(dihedrals),
-                    number_frames=number_frames,
-                )
+                start = len(batched_dihedrals)
+                batched_dihedrals.extend(dihedrals)
+                ua_spans.append((res_id, start, len(batched_dihedrals)))
 
         if "residue" in level_list and topology.residue_dihedrals:
+            start = len(batched_dihedrals)
+            batched_dihedrals.extend(topology.residue_dihedrals)
+            residue_span = (start, len(batched_dihedrals))
+
+        if batched_dihedrals:
             dihedral_results = self._run_dihedrals(
-                dihedrals=topology.residue_dihedrals,
+                dihedrals=batched_dihedrals,
                 frame_selection=task.frame_selection,
             )
-            residue_angles = self._extract_positive_angle_array(
-                dihedral_results=dihedral_results,
-                num_dihedrals=len(topology.residue_dihedrals),
-                number_frames=number_frames,
+            batched_angles = np.asarray(
+                dihedral_results.results.angles[
+                    :number_frames, : len(batched_dihedrals)
+                ],
+                dtype=np.float64,
             )
+
+            for res_id, start, stop in ua_spans:
+                ua_angles_by_residue[res_id] = wrap_degrees_positive(
+                    batched_angles[:, start:stop]
+                )
+
+            if residue_span is not None:
+                residue_angles = wrap_degrees_positive(
+                    batched_angles[:, residue_span[0] : residue_span[1]]
+                )
 
         return DihedralAngleObservable(
             task=task,

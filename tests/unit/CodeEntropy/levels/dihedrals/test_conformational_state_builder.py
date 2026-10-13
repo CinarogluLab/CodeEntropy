@@ -120,9 +120,9 @@ def test_build_conformational_states_with_progress_handles_no_groups():
     )
 
     assert states_ua == {}
-    assert states_res == []
+    assert states_res == {}
     assert flex_ua == {}
-    assert flex_res == []
+    assert flex_res == {}
     progress.add_task.assert_called_once()
     progress.update.assert_called_once_with(123, title="No groups")
     progress.advance.assert_called_once_with(123)
@@ -143,9 +143,9 @@ def test_build_conformational_states_with_progress_skips_empty_molecule_group():
     )
 
     assert states_ua == {}
-    assert states_res == [[]]
+    assert states_res == {}
     assert flex_ua == {}
-    assert flex_res == []
+    assert flex_res == {}
     progress.update.assert_called_with(5, title="Group 0 (empty)")
     progress.advance.assert_called_with(5)
 
@@ -179,9 +179,9 @@ def test_chunked_serial_group_flow_calls_domain_phases_in_order():
     )
 
     assert states_ua == {(0, 0): ["0"]}
-    assert states_res == [[], []]
+    assert states_res == {0: []}
     assert flexible_ua == {(0, 0): 0}
-    assert flexible_res == [0]
+    assert flexible_res == {0: 0}
     builder._discover_group_dihedral_topology.assert_called_once_with(
         data_container="universe",
         group_id=0,
@@ -245,3 +245,41 @@ def test_chunked_serial_with_progress_updates_and_advances_non_empty_group():
 
     progress.update.assert_any_call(44, title="Group 0")
     progress.advance.assert_called_with(44)
+
+
+def test_residue_states_are_keyed_by_non_contiguous_group_ids():
+    """Residue results must be retrievable by group id, not by position.
+
+    Group ids are not contiguous when water groups are removed from a system
+    in which water is not the last group (e.g. protein, ligand, water, ions).
+    Consumers look residue states and flexible-dihedral counts up by group id,
+    so a positional list returned the wrong group's data or ran out of range.
+    """
+    builder = ConformationStateBuilder(universe_operations=MagicMock())
+    frame_selection = _make_frame_selection(start=0, stop=2, step=1)
+    by_group = {
+        0: ConformationStateData(["a0", "a1"], 3, {}, {}),
+        3: ConformationStateData(["b0", "b1"], 5, {}, {}),
+    }
+
+    builder._discover_group_dihedral_topology = MagicMock(return_value=[])
+    builder._build_conformation_chunk_tasks = MagicMock(return_value=[])
+    builder._reduce_angle_observables_to_peak_data = MagicMock(
+        return_value=DihedralPeakData(peaks_ua=[], peaks_res=[])
+    )
+    group_order = iter(sorted(by_group))
+    builder._reduce_state_partials = MagicMock(
+        side_effect=lambda partials: by_group[next(group_order)]
+    )
+
+    _, states_res, _, flexible_res = builder._build_conformational_states_serial_chunked(
+        data_container="universe",
+        levels={7: ["united_atom", "residue"], 8: ["united_atom", "residue"]},
+        groups={0: [7], 3: [8]},
+        bin_width=30.0,
+        frame_selection=frame_selection,
+        chunk_size=2,
+    )
+
+    assert states_res == {0: ["a0", "a1"], 3: ["b0", "b1"]}
+    assert flexible_res == {0: 3, 3: 5}

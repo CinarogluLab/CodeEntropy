@@ -95,3 +95,38 @@ def test_get_grouping_strategy_reads_args_with_default():
 
 def test_count_molecules_counts_fragments():
     assert DetectMoleculesNode._count_molecules(FakeUniverse(4)) == 4
+
+
+def test_predag_water_groups_opt_in_keeps_workflow_groups(monkeypatch):
+    monkeypatch.setenv("CODEENTROPY_PREDAG_WATER_GROUPS", "1")
+    node = DetectMoleculesNode()
+    node._grouping = MagicMock()
+    workflow_groups = {0: [0], 1: [1]}
+    shared_data = {
+        "reduced_universe": FakeUniverse(3),
+        "args": SimpleNamespace(grouping="molecules"),
+        "groups": workflow_groups,
+    }
+
+    result = node.run(shared_data)
+
+    node._grouping.grouping_molecules.assert_not_called()
+    assert shared_data["groups"] is workflow_groups
+    assert result["groups"] is workflow_groups
+    assert shared_data["number_molecules"] == 3
+
+
+def test_predag_water_groups_default_off_regroups(monkeypatch):
+    monkeypatch.delenv("CODEENTROPY_PREDAG_WATER_GROUPS", raising=False)
+    node = DetectMoleculesNode()
+    node._grouping = MagicMock()
+    node._grouping.grouping_molecules.return_value = {0: [0], 1: [1], 2: [2]}
+    shared_data = {
+        "reduced_universe": FakeUniverse(3),
+        "args": SimpleNamespace(grouping="molecules"),
+        "groups": {0: [0], 1: [1]},
+    }
+
+    node.run(shared_data)
+
+    assert shared_data["groups"] == {0: [0], 1: [1], 2: [2]}

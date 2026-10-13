@@ -8,6 +8,7 @@ grouping strategy.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from CodeEntropy.molecules.grouping import MoleculeGrouper
@@ -50,7 +51,15 @@ class DetectMoleculesNode:
 
         grouping_strategy = self._get_grouping_strategy(shared_data)
 
-        groups = self._grouping.grouping_molecules(universe, grouping_strategy)
+        # Diagnostic, off by default: pre-DAG CodeEntropy passed the workflow's
+        # water-filtered groups straight into MCC. This node re-grouping the full
+        # reduced universe re-adds bulk water to MCC when water entropy is on.
+        if os.environ.get("CODEENTROPY_PREDAG_WATER_GROUPS") == "1" and (
+            shared_data.get("groups") is not None
+        ):
+            groups = shared_data["groups"]
+        else:
+            groups = self._grouping.grouping_molecules(universe, grouping_strategy)
         number_molecules = self._count_molecules(universe)
 
         shared_data["groups"] = groups

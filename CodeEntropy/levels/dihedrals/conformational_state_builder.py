@@ -108,11 +108,13 @@ class ConformationStateBuilder(ConformationPeakDetector, ConformationStateAssign
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
 
-        number_groups = len(groups)
+        # Residue results are keyed by group id, which is how every consumer
+        # looks them up. Group ids need not be contiguous (e.g. when water
+        # groups are removed), so a positional list cannot represent them.
         states_ua: dict[UAKey, list[str]] = {}
-        states_res: list[list[str]] = [[] for _ in range(number_groups)]
+        states_res: dict[int, list[str]] = {}
         flexible_ua: dict[UAKey, int] = {}
-        flexible_res: list[int] = []
+        flexible_res: dict[int, int] = {}
 
         task: TaskID | None = None
         if progress is not None:
@@ -186,6 +188,7 @@ class ConformationStateBuilder(ConformationPeakDetector, ConformationStateAssign
             state_data = self._reduce_state_partials(state_partials)
 
             self._merge_group_state_data(
+                group_id=group_id,
                 state_data=state_data,
                 states_ua=states_ua,
                 states_res=states_res,

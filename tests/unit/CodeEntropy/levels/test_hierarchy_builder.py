@@ -78,31 +78,20 @@ def test_get_beads_united_atom_no_heavy_atoms_falls_back_to_all():
     assert out == ["ALL"]
 
 
-def test_get_beads_united_atom_builds_selection_per_heavy_atom():
+def test_united_atom_beads_match_selection_for_partial_and_unsorted_containers():
+    import MDAnalysis as mda
+    import numpy as np
+
+    u = mda.Universe.empty(6)
+    u.add_TopologyAttr('masses', [12., 1.008, 16., 1.008, 1.008, 12.])
+    u.add_TopologyAttr('bonds', [(0, 1), (0, 2), (2, 3), (2, 4)])
     hb = HierarchyBuilder()
-
-    mol = MagicMock()
-    h0 = MagicMock()
-    h1 = MagicMock()
-    h0.index = 7
-    h1.index = 9
-
-    heavy = [h0, h1]
-    heavy_group = MagicMock()
-    heavy_group.__len__.return_value = 2
-    heavy_group.__iter__.return_value = iter(heavy)
-
-    def _select(sel):
-        if sel == "prop mass > 1.1":
-            return heavy_group
-        bead = MagicMock()
-        bead.__len__.return_value = 1
-        return bead
-
-    mol.select_atoms.side_effect = _select
-
-    out = hb.get_beads(mol, "united_atom")
-    assert len(out) == 2
-    calls = [c.args[0] for c in mol.select_atoms.call_args_list]
-    assert any("index 7" in s for s in calls)
-    assert any("index 9" in s for s in calls)
+    for indices in ([0, 1, 2, 3, 4, 5], [4, 2, 0], [5, 2, 2, 3]):
+        mol = u.atoms[indices]
+        expected = [mol.select_atoms(
+            f'index {a.index} or ((prop mass <= 1.1) and bonded index {a.index})'
+        ).indices for a in mol.select_atoms('prop mass > 1.1')]
+        actual = hb.get_beads(mol, 'united_atom')
+        assert len(actual) == len(expected)
+        for bead, reference in zip(actual, expected):
+            np.testing.assert_array_equal(bead.indices, reference)

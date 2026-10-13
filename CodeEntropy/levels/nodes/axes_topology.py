@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+from CodeEntropy.levels import topology_cache
+
 logger = logging.getLogger(__name__)
 
 UAKey = tuple[int, int, int]
@@ -159,7 +161,9 @@ class BuildAxesTopologyNode:
                 continue
 
             residue_atoms = residue.atoms
-            residue_heavy = residue_atoms.select_atoms("mass 2 to 999")
+            residue_heavy = residue_atoms[
+                (residue_atoms.masses >= 2) & (residue_atoms.masses <= 999)
+            ]
             residue_heavy_indices = residue_heavy.indices.astype(int, copy=True)
             residue_ua_masses = np.asarray(
                 self._get_ua_masses_from_topology(residue_atoms),
@@ -211,7 +215,7 @@ class BuildAxesTopologyNode:
 
             for ua_i, bead_indices in enumerate(bead_idx_list):
                 bead = u.atoms[bead_indices]
-                heavy = bead.select_atoms("prop mass > 1.1")
+                heavy = bead[bead.masses > 1.1]
 
                 if len(heavy) == 0:
                     logger.warning(
@@ -280,9 +284,23 @@ class BuildAxesTopologyNode:
         Returns:
             Tuple containing bonded heavy atoms and bonded hydrogens/light atoms.
         """
+        # atom.bonded_atoms re-walks the bond graph on every access; when a
+        # real Universe is available, use the per-Universe adjacency cache
+        # (shared with hierarchy.py) instead. Test doubles without a
+        # .universe attribute fall back to the original path.
+        universe = getattr(atom, "universe", None)
+        if universe is not None:
+            bonded_idx = topology_cache.get_bonded_indices(universe)[atom.index]
+            universe_atoms = universe.atoms
+            masses = universe_atoms.masses[bonded_idx]
+            bonded_heavy = universe_atoms[bonded_idx[(masses >= 2) & (masses <= 999)]]
+            bonded_light = universe_atoms[bonded_idx[(masses >= 1) & (masses <= 1.1)]]
+            return bonded_heavy, bonded_light
+
         bonded_atoms = atom.bonded_atoms
-        bonded_heavy = bonded_atoms.select_atoms("mass 2 to 999")
-        bonded_light = bonded_atoms.select_atoms("mass 1 to 1.1")
+        masses = bonded_atoms.masses
+        bonded_heavy = bonded_atoms[(masses >= 2) & (masses <= 999)]
+        bonded_light = bonded_atoms[(masses >= 1) & (masses <= 1.1)]
         return bonded_heavy, bonded_light
 
     @staticmethod
@@ -302,12 +320,27 @@ class BuildAxesTopologyNode:
                 continue
 
             ua_mass = float(atom.mass)
+            universe = getattr(atom, "universe", None)
+            if universe is not None:
+                bonded_idx = topology_cache.get_bonded_indices(universe)[atom.index]
+                bonded_masses = universe.atoms.masses[bonded_idx]
+                h_mask = (bonded_masses >= 1) & (bonded_masses <= 1.1)
+                # Scalar addition in bonded order, as the original loop did;
+                # ndarray.sum() would regroup the floating-point additions.
+                for hydrogen_mass in bonded_masses[h_mask]:
+                    ua_mass += float(hydrogen_mass)
+                ua_masses.append(ua_mass)
+                continue
+
             bonded_atoms = getattr(atom, "bonded_atoms", None)
             if bonded_atoms is None:
                 ua_masses.append(ua_mass)
                 continue
 
-            bonded_h_atoms = bonded_atoms.select_atoms("mass 1 to 1.1")
+            bonded_masses = bonded_atoms.masses
+            bonded_h_atoms = bonded_atoms[
+                (bonded_masses >= 1) & (bonded_masses <= 1.1)
+            ]
             for hydrogen in bonded_h_atoms:
                 ua_mass += float(hydrogen.mass)
 

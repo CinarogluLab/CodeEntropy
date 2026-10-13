@@ -9,11 +9,53 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 from MDAnalysis.lib.mdamath import make_whole
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _MoleculeAxesMemo:
+    """Frame-local record of one molecule's whole-molecule axes.
+
+    Every per-call input of ``make_whole`` and of the principal-axes
+    calculation is recorded here, so that a cached result is only reused when
+    all of them are unchanged: the atoms themselves, their masses, their
+    positions, and the periodic box. Bonds are not recorded; they are assumed
+    fixed for the lifetime of the universe, as CodeEntropy never modifies them.
+
+    Attributes:
+        universe_id: Identity of the owning universe.
+        atom_indices: Indices of the molecule's atoms.
+        masses: Atom masses read by the moment-of-inertia tensor.
+        dimensions: Periodic box as used by the recorded call.
+        positions: Molecule positions as left by the last ``make_whole`` call.
+        trans_axes: Principal axes computed from those positions.
+        at_fixpoint: Whether a ``make_whole`` call has been observed to leave the
+            positions unchanged, which makes further calls provably redundant.
+    """
+
+    universe_id: int
+    atom_indices: np.ndarray
+    masses: np.ndarray
+    dimensions: np.ndarray | None
+    positions: np.ndarray
+    trans_axes: np.ndarray
+    at_fixpoint: bool
+
+    def matches(self, universe_id, atom_indices, masses, dimensions, positions) -> bool:
+        """Return whether every recorded input is unchanged."""
+        return (
+            self.universe_id == universe_id
+            and np.array_equal(self.atom_indices, atom_indices)
+            and np.array_equal(self.masses, masses)
+            and np.array_equal(self.dimensions, dimensions)
+            and self.positions.shape == positions.shape
+            and np.array_equal(self.positions, positions)
+        )
 
 
 class AxesCalculator:
@@ -60,6 +102,86 @@ class AxesCalculator:
         self._trans_axes = None
         self._rot_axes = None
         self._number_of_beads = None
+        # Frame-local memo for whole-molecule translational axes. See
+        # _molecule_trans_axes for the exactness argument.
+        self._mol_axes_memo: _MoleculeAxesMemo | None = None
+
+    def _molecule_trans_axes(self, mol):
+        """Return whole-molecule principal axes, skipping proven-redundant work.
+
+        ``get_residue_axes_from_topology`` is called once per residue, and each
+        call made the *whole* molecule whole and recomputed its principal axes.
+        Both depend only on the molecule and the current frame, so for a
+        117-residue protein the identical 15 ms ``make_whole`` ran 117 times per
+        frame (~40% of total runtime).
+
+        Skipping those repeats is only safe where repeating them provably does
+        nothing, and that is *not* universally true. ``make_whole`` writes
+        ``new[o] = new[a] + minimum_image(old[o] - new[a])``. On an already-whole
+        molecule the image shift is zero and every position maps to itself, so
+        the first call is a fixpoint. But on a molecule split across the periodic
+        boundary, repeated calls keep perturbing a handful of positions by one
+        float32 ULP (measured: 3-15 atoms of 1961 moving 6e-8 A, never settling
+        on some frames). There the *original* result already depends on how many
+        times it was called.
+
+        So this memo never assumes idempotence; it observes it. A cached result
+        is reused only once a call has been seen to leave the positions
+        unchanged, i.e. once ``make_whole`` is known to be at a fixpoint for this
+        molecule in this frame. Until then every call runs exactly as before.
+        Consequences:
+
+        - whole molecules (the normal case, e.g. a nojump/whole trajectory): two
+          calls per molecule per frame instead of 117, bitwise identical;
+        - split molecules: falls back to the original call-for-call behaviour,
+          so nothing changes, including the upstream instability above.
+
+        The cache is keyed on every per-call input of ``make_whole`` and of the
+        principal axes: the universe, the atom indices, the masses (read by the
+        moment-of-inertia tensor), the positions and the periodic box. Bonds are
+        assumed fixed for the universe's lifetime. A constant-volume
+        trajectory changes none of them within a frame, but a box that varies
+        frame to frame (NPT) does, and an unguarded box would let a fixpoint
+        observed under one box be reused under another. All comparisons together
+        cost microseconds against a 15 ms ``make_whole``.
+
+        Args:
+            mol: Molecule fragment (AtomGroup) whose axes are required.
+
+        Returns:
+            np.ndarray: Whole-molecule principal axes, shape ``(3, 3)``.
+        """
+        atoms = mol.atoms
+        universe_id = id(atoms.universe)
+        atom_indices = atoms.ix
+        masses = atoms.masses
+        dimensions = atoms.dimensions
+        positions = atoms.positions
+
+        memo = self._mol_axes_memo
+        fresh = memo is not None and memo.matches(
+            universe_id, atom_indices, masses, dimensions, positions
+        )
+        if fresh and memo.at_fixpoint:
+            # Copy so callers keep the original's fresh-array semantics.
+            return memo.trans_axes.copy()
+
+        make_whole(atoms)
+        trans_axes = self.get_principal_axes_from_group(atoms)
+        new_positions = atoms.positions.copy()
+        # This call changed nothing, so make_whole is at a fixpoint for these
+        # exact inputs and further calls with them are provably no-ops.
+        at_fixpoint = fresh and np.array_equal(memo.positions, new_positions)
+        self._mol_axes_memo = _MoleculeAxesMemo(
+            universe_id=universe_id,
+            atom_indices=np.array(atom_indices, copy=True),
+            masses=np.array(masses, copy=True),
+            dimensions=None if dimensions is None else np.array(dimensions, copy=True),
+            positions=new_positions,
+            trans_axes=trans_axes,
+            at_fixpoint=at_fixpoint,
+        )
+        return trans_axes
 
     def get_residue_axes(
         self, data_container, index: int, relative_index: int, residue=None
@@ -224,8 +346,7 @@ class AxesCalculator:
             )
             trans_axes = rot_axes
         else:
-            make_whole(mol.atoms)
-            trans_axes = self.get_principal_axes_from_group(mol.atoms)
+            trans_axes = self._molecule_trans_axes(mol)
             rot_axes, moment_of_inertia = self.get_molecule_axes(residue_atoms)
             center = residue_atoms.center_of_mass(unwrap=True)
 

@@ -16,6 +16,7 @@ The manager intentionally delegates calculations to dedicated components.
 from __future__ import annotations
 
 import logging
+import os
 from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any
@@ -108,6 +109,15 @@ class EntropyWorkflow:
         if self._args.water_entropy and water_groups and nonwater_groups:
             self._compute_water_entropy(frame_selection, water_groups)
         else:
+            # Opt-in, for the water-only reference box: export bulk water entropy on
+            # the same footing as the first-shell export. MCC still runs as before.
+            if (
+                self._args.water_entropy
+                and water_groups
+                and not nonwater_groups
+                and os.environ.get("CODEENTROPY_BULK_WATER_EXPORT") == "1"
+            ):
+                self._compute_bulk_water_export(frame_selection, water_groups)
             nonwater_groups.update(water_groups)
 
         shared_data = self._build_shared_data(
@@ -364,6 +374,33 @@ class EntropyWorkflow:
             gid: g for gid, g in sorted(groups.items()) if gid not in water_groups
         }
         return nonwater_groups, water_groups
+
+    def _compute_bulk_water_export(
+        self,
+        frame_selection: FrameSelection,
+        water_groups: Mapping[int, Any],
+    ) -> None:
+        """Export bulk water entropy for each water group of a water-only system.
+
+        Args:
+            frame_selection: Workflow frame selection.
+            water_groups: Mapping of group id to molecule ids for waters.
+        """
+        start = frame_selection.source_start
+        end = frame_selection.source_stop_exclusive
+        step = frame_selection.infer_source_step()
+        if start is None or end is None:
+            return
+
+        water_entropy = WaterEntropy(self._args, self._reporter)
+        for group_id in water_groups.keys():
+            water_entropy.calculate_bulk_export(
+                universe=self._universe,
+                start=start,
+                end=end,
+                step=step,
+                group_id=group_id,
+            )
 
     def _compute_water_entropy(
         self,

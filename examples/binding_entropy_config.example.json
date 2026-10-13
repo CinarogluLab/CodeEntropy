@@ -1,0 +1,36 @@
+{
+  "ligand_resname": "LIG",
+  "receptor_resnames": ["CHOOSE: every residue name of the receptor, e.g. its amino acids and caps (ACE, NHE...); ions and other unlisted names are ignored"],
+  "complex": {
+    "runs": [
+      "complex/rep01/output.json", "complex/rep02/output.json", "complex/rep03/output.json",
+      "complex/rep04/output.json", "complex/rep05/output.json", "complex/rep06/output.json",
+      "complex/rep07/output.json", "complex/rep08/output.json", "complex/rep09/output.json",
+      "complex/rep10/output.json"
+    ],
+    "receptor_group": "0",
+    "ligand_group": "1"
+  },
+  "receptor": {
+    "runs": ["protein/rep01/output.json", "...one path per replicate..."],
+    "receptor_group": "0"
+  },
+  "ligand": {
+    "runs": ["ligand/rep01/output.json", "...one path per replicate..."],
+    "ligand_group": "0"
+  },
+  "water": {
+    "runs": ["water/rep01/output.json", "...one path per replicate..."],
+    "water_group": "0"
+  },
+  "choices": {
+    "water_orientational_field": "CHOOSE: S_orient_hb_biased | S_orient_non_hb_Nc | S_orient_non_hb_Nw",
+    "bulk_water_source": "CHOOSE: waterentropy_bulk_export (water-only runs made with CODEENTROPY_BULK_WATER_EXPORT=1; same waterEntropy recipe family as the shell terms; must come from the real water-only simulation) | mcc_water_group (diagnostic only)",
+    "unbound_ligand_orientational": "CHOOSE: codeentropy | {\"method\": \"paper_eq7\", \"symmetry_number\": <ligand sigma>, \"p_corr\": 1.0}",
+    "bound_ligand_orientational_J_per_molK": "CHOOSE: number in J/mol/K (paper Eq. 8 is k ln(sigma_host/sigma_guest) for a symmetric host)",
+    "ligand_positional": "CHOOSE: paper_1M (R ln 55.5 = 33.4 J/mol/K) | number",
+    "shell_scope": "CHOOSE: all | {\"include\": [\"RESNAME_RESID\", ...]} (ligand shells always included)",
+    "replicates": "CHOOSE: independent | paired",
+    "population_tolerance": 1e-9
+  }
+}
