@@ -67,12 +67,36 @@ def histogram_counts_by_dihedral(
 
 
 @njit(cache=True)
+def circular_angle_distance(a: float, b: float) -> float:
+    """Return the shortest distance between two angles on the circle, in degrees.
+
+    Dihedral angles are periodic: 359 degrees and 1 degree are 2 degrees apart,
+    not 358. Both inputs are first reduced into ``[0, 360)``, so values outside
+    that range (including exactly 360) are handled consistently.
+
+    Args:
+        a: First angle in degrees.
+        b: Second angle in degrees.
+
+    Returns:
+        Distance in degrees, in ``[0, 180]``.
+    """
+    distance = abs((a % 360.0) - (b % 360.0))
+    return min(distance, 360.0 - distance)
+
+
+@njit(cache=True)
 def assign_peak_labels_and_count_flexible(
     angles: np.ndarray,
     padded_peaks: np.ndarray,
     peak_counts: np.ndarray,
 ) -> tuple[np.ndarray, int]:
     """Assign nearest-peak labels and count flexible dihedrals.
+
+    The nearest peak is found with the periodic (circular) angle distance, so
+    a state centred near 0/360 degrees is recognised on both sides of the
+    seam. Peak finding treats the histogram as circular in the same way. Ties
+    go to the first peak in ``padded_peaks``.
 
     Args:
         angles: Positive-angle array with shape ``(n_frames, n_dihedrals)``.
@@ -97,10 +121,14 @@ def assign_peak_labels_and_count_flexible(
         for frame_i in range(n_frames):
             value = angles[frame_i, dihedral_i]
             best_label = 0
-            best_distance = abs(value - padded_peaks[dihedral_i, 0])
+            best_distance = circular_angle_distance(
+                value, padded_peaks[dihedral_i, 0]
+            )
 
             for peak_i in range(1, n_peaks):
-                distance = abs(value - padded_peaks[dihedral_i, peak_i])
+                distance = circular_angle_distance(
+                    value, padded_peaks[dihedral_i, peak_i]
+                )
                 if distance < best_distance:
                     best_distance = distance
                     best_label = peak_i
